@@ -1,0 +1,3 @@
+neurosdk
+pylsl
+numpy
