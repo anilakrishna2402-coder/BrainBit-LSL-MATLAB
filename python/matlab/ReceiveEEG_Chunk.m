@@ -1,105 +1,334 @@
 clear;
 clc;
+close all;
 
-%% Load LSL
-disp("Loading LSL library...");
+%% =========================================================
+% LOAD LSL
+% ==========================================================
+
+disp("Loading LSL...");
+
 lib = lsl_loadlib();
 
-%% Find EEG Stream
-disp("Looking for EEG stream...");
+%% =========================================================
+% FIND EEG STREAM
+% ==========================================================
+
+disp("Searching for BrainBit LSL stream...");
+
 result = {};
 
 while isempty(result)
+
     result = lsl_resolve_byprop(lib,'type','EEG');
+
     pause(1);
+
 end
 
-disp("EEG stream found!");
+disp("EEG Stream Found!");
 
-%% Create inlet
+%% =========================================================
+% CREATE LSL INLET
+% ==========================================================
+
 inlet = lsl_inlet(result{1});
 
-disp("Receiving EEG chunks for 10 seconds...");
+disp("Receiving EEG chunks...");
 
-EEG = [];
-Time = [];
+
+%% =========================================================
+% SETTINGS
+% ==========================================================
+
+fs = 250;
+
+numChannels = 4;
+
+windowSeconds = 10;
+
+maxSamples = fs * windowSeconds;
+
+% Vertical distance between channels
+verticalSpacing = 1;
+
+% Signal amplification on screen
+gain = 5;
+
+%% =========================================================
+% ROLLING EEG BUFFER
+% ==========================================================
+
+EEG = zeros(0,numChannels);
+
+Time = zeros(0,1);
 
 chunkNumber = 0;
 
-startTime = tic;
+%% =========================================================
+% CREATE FIGURE
+% ==========================================================
 
-while toc(startTime) < 10
+fig = figure( ...
+    'Name','BrainBit Live EEG', ...
+    'NumberTitle','off', ...
+    'Color','w');
 
-    % Receive chunk
-    [chunk, timestamps] = inlet.pull_chunk();
+ax = axes('Parent',fig);
 
-    % Skip empty chunk
+hold(ax,'on');
+
+grid(ax,'on');
+
+%% =========================================================
+% CREATE FOUR EEG LINES
+% ==========================================================
+
+line1 = plot(ax,nan,nan,'LineWidth',1);
+
+line2 = plot(ax,nan,nan,'LineWidth',1);
+
+line3 = plot(ax,nan,nan,'LineWidth',1);
+
+line4 = plot(ax,nan,nan,'LineWidth',1);
+
+lines = [line1 line2 line3 line4];
+
+%% =========================================================
+% AXIS
+% ==========================================================
+
+xlabel(ax,'Time (seconds)');
+
+ylabel(ax,'EEG Channels');
+
+title(ax,'BrainBit Live EEG');
+
+%% =========================================================
+% CHANNEL LABELS
+% ==========================================================
+
+channelLabels = {
+    'Channel 1'
+    'Channel 2'
+    'Channel 3'
+    'Channel 4'
+};
+
+% Channel 1 will be at the TOP.
+% Channel 4 will be at the BOTTOM.
+
+offsets = [
+    3
+    2
+    1
+    0
+];
+
+yticks(ax,[0 1 2 3]);
+
+yticklabels(ax,{
+    'Channel 4'
+    'Channel 3'
+    'Channel 2'
+    'Channel 1'
+});
+
+ylim(ax,[-0.5 3.5]);
+xlim(ax,[-windowSeconds 0]);
+
+%% =========================================================
+% RECEIVE EEG CONTINUOUSLY
+% ==========================================================
+
+while ishandle(fig)
+
+    %% -----------------------------------------------------
+    % RECEIVE LSL CHUNK
+    % ------------------------------------------------------
+
+    [chunk,timestamps] = inlet.pull_chunk();
+
     if isempty(chunk)
-        pause(0.01);
+
+        pause(0.001);
+
         continue;
+
     end
 
-    % Make sure chunk is Nx4
-    if size(chunk,1) == 4
-        chunk = chunk';
-    end
-
-    % Store data
-    EEG = [EEG; chunk];
-
-    if size(timestamps,1) == 1
-        timestamps = timestamps';
-    end
-
-    Time = [Time; timestamps];
+    %% -----------------------------------------------------
+    % CHUNK INFORMATION
+    % ------------------------------------------------------
 
     chunkNumber = chunkNumber + 1;
 
-    fprintf("\n=====================================\n");
-    fprintf("Chunk %d received\n", chunkNumber);
-    fprintf("Samples in chunk: %d\n", size(chunk,1));
-    fprintf("=====================================\n");
+    fprintf('\n=====================================\n');
 
-    % Print every sample inside chunk
-    for i = 1:size(chunk,1)
+    fprintf('Chunk %d\n',chunkNumber);
 
-        fprintf("Sample %3d | Time %.3f | ", ...
-            i, timestamps(i));
+    fprintf('Raw chunk size : %d x %d\n', ...
+        size(chunk,1),size(chunk,2));
 
-        fprintf("Ch1: %.4f  ", chunk(i,1));
-        fprintf("Ch2: %.4f  ", chunk(i,2));
-        fprintf("Ch3: %.4f  ", chunk(i,3));
-        fprintf("Ch4: %.4f\n", chunk(i,4));
+    fprintf('Timestamp size : %d\n', ...
+        length(timestamps));
+
+    %% -----------------------------------------------------
+    % CONVERT 4 x N TO N x 4
+    % ------------------------------------------------------
+
+    chunk = chunk';
+
+    fprintf('After transpose: %d x %d\n', ...
+        size(chunk,1),size(chunk,2));
+
+    %% -----------------------------------------------------
+    % CHECK CHANNEL COUNT
+    % ------------------------------------------------------
+
+    if size(chunk,2) ~= numChannels
+
+        warning("Unexpected number of EEG channels.");
+
+        continue;
 
     end
 
+    %% -----------------------------------------------------
+    % ADD CHUNK TO BUFFER
+    % ------------------------------------------------------
+
+    EEG = [EEG; chunk];
+
+    %% -----------------------------------------------------
+    % CREATE TIME VECTOR
+    % ------------------------------------------------------
+
+    numberOfSamples = size(chunk,1);
+
+    if isempty(Time)
+
+        startTime = 0;
+
+    else
+
+        startTime = Time(end) + 1/fs;
+
+    end
+
+    newTime = startTime + ...
+        (0:numberOfSamples-1)' / fs;
+
+    Time = [Time; newTime];
+
+    %% -----------------------------------------------------
+    % KEEP ONLY LAST 10 SECONDS
+    % ------------------------------------------------------
+
+    if size(EEG,1) > maxSamples
+
+        EEG = EEG(end-maxSamples+1:end,:);
+
+        Time = Time(end-maxSamples+1:end);
+
+    end
+
+    %% -----------------------------------------------------
+    % REMOVE DC OFFSET
+    % ------------------------------------------------------
+
+    EEGplot = EEG - mean(EEG,1);
+
+    %% -----------------------------------------------------
+    % TIME FOR DISPLAY
+    % ------------------------------------------------------
+
+    TimePlot = Time - Time(end);
+
+    %% -----------------------------------------------------
+    % UPDATE CHANNEL 1
+    % ------------------------------------------------------
+
+    signal1 = EEGplot(:,1) * gain;
+
+    signal1 = signal1 + offsets(1);
+
+    set(line1, ...
+        'XData',TimePlot, ...
+        'YData',signal1);
+
+    %% -----------------------------------------------------
+    % UPDATE CHANNEL 2
+    % ------------------------------------------------------
+
+    signal2 = EEGplot(:,2) * gain;
+
+    signal2 = signal2 + offsets(2);
+
+    set(line2, ...
+        'XData',TimePlot, ...
+        'YData',signal2);
+
+    %% -----------------------------------------------------
+    % UPDATE CHANNEL 3
+    % ------------------------------------------------------
+
+    signal3 = EEGplot(:,3) * gain;
+
+    signal3 = signal3 + offsets(3);
+
+    set(line3, ...
+        'XData',TimePlot, ...
+        'YData',signal3);
+
+    %% -----------------------------------------------------
+    % UPDATE CHANNEL 4
+    % ------------------------------------------------------
+
+    signal4 = EEGplot(:,4) * gain;
+
+    signal4 = signal4 + offsets(4);
+
+    set(line4, ...
+        'XData',TimePlot, ...
+        'YData',signal4);
+
+    %% -----------------------------------------------------
+    % KEEP DISPLAY FIXED
+    % ------------------------------------------------------
+
+    xlim(ax,[-windowSeconds 0]);
+
+    ylim(ax,[-0.5 3.5]);
+
+    %% -----------------------------------------------------
+    % DISPLAY SAMPLE INFORMATION
+    % ------------------------------------------------------
+
+    fprintf('Samples in buffer : %d\n',size(EEG,1));
+
+    fprintf('First sample:\n');
+
+    fprintf('%.6f  %.6f  %.6f  %.6f\n', ...
+        chunk(1,1), ...
+        chunk(1,2), ...
+        chunk(1,3), ...
+        chunk(1,4));
+
+    fprintf('Last sample:\n');
+
+    fprintf('%.6f  %.6f  %.6f  %.6f\n', ...
+        chunk(end,1), ...
+        chunk(end,2), ...
+        chunk(end,3), ...
+        chunk(end,4));
+
+    %% -----------------------------------------------------
+    % REFRESH FIGURE
+    % ------------------------------------------------------
+
+    drawnow limitrate;
+
 end
 
-disp("--------------------------------");
-disp("Finished receiving.");
-fprintf("Total chunks : %d\n", chunkNumber);
-fprintf("Total samples: %d\n", size(EEG,1));
-
-%% Save
-
-save('BrainBit_EEG_Chunk.mat','EEG','Time');
-
-disp("Saved as BrainBit_EEG_Chunk.mat");
-
-%% Plot
-
-figure;
-
-plot(Time-Time(1),EEG(:,1),'LineWidth',1);
-hold on
-plot(Time-Time(1),EEG(:,2),'LineWidth',1);
-plot(Time-Time(1),EEG(:,3),'LineWidth',1);
-plot(Time-Time(1),EEG(:,4),'LineWidth',1);
-
-xlabel('Time (seconds)');
-ylabel('Amplitude');
-title('BrainBit EEG (Chunk Reception)');
-legend('Ch1','Ch2','Ch3','Ch4');
-grid on;
-
-disp("Plot generated successfully.");
+disp("EEG receiver stopped.");
