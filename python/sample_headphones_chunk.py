@@ -4,80 +4,151 @@ from neurosdk.cmn_types import *
 from pylsl import StreamInfo, StreamOutlet
 from time import sleep
 
-# --------------------------------------------------
-# LSL SETUP
-# --------------------------------------------------
+# ==========================================================
+# LSL STREAM SETUP
+# ==========================================================
 
 info = StreamInfo(
-    'BrainBit',
-    'EEG',
-    4,
-    250,
-    'float32',
-    'brainbit001'
+    name='BrainBit',
+    type='EEG',
+    channel_count=4,
+    nominal_srate=250,
+    channel_format='float32',
+    source_id='BrainBit_EEG_001'
 )
 
-outlet = StreamOutlet(info)
+# Send chunks instead of single samples
+outlet = StreamOutlet(
+    info,
+    chunk_size=8,      # LSL may package data efficiently; actual callback size may vary
+    max_buffered=360
+)
 
-print("LSL Outlet Created Successfully")
+print("===================================================")
+print("BrainBit LSL Chunk Stream Created")
+print("===================================================")
 
-# --------------------------------------------------
-# CHUNK SETTINGS
-# --------------------------------------------------
+chunk_count = 0
+sample_count = 0
 
-CHUNK_SIZE = 50
-buffer = []
-
-# --------------------------------------------------
+# ==========================================================
 # CALLBACKS
-# --------------------------------------------------
+# ==========================================================
 
 def sensor_found(scanner, sensors):
     for sensor in sensors:
-        print("Sensor found:", sensor)
+        print("Sensor Found:", sensor)
 
 
 def on_sensor_state_changed(sensor, state):
-    print(f"Sensor {sensor.name} is {state}")
+    print("Sensor State:", state)
 
 
 def on_battery_changed(sensor, battery):
-    print("Battery:", battery)
+    print("Battery:", battery, "%")
 
 
-def on_signal_received(sensor, data):
+def on_amp_changed(sensor, mode):
+    print("Amplifier Mode:", mode)
 
-    global buffer
+
+def on_resist(sensor, data):
+    # Only for checking electrode contact.
+    # Do NOT stream resistance values.
+    pass
+
+
+def on_signal(sensor, data):
+    first = data[0]
+    last = data[-1]
+        # -------- EEG SIGNAL QUALITY CHECK --------
+    channels = [
+        [x.Ch1 for x in data],
+        [x.Ch2 for x in data],
+        [x.Ch3 for x in data],
+        [x.Ch4 for x in data]
+    ]
+
+    print("\n--- EEG Quality Check ---")
+
+    for i, ch in enumerate(channels, start=1):
+        minimum = min(ch)
+        maximum = max(ch)
+        mean = sum(ch) / len(ch)
+
+        print(
+            f"Ch{i}: "
+            f"Min={minimum:.6f}, "
+            f"Max={maximum:.6f}, "
+            f"Mean={mean:.6f}"
+        )
+
+    print("------------------------")
+
+    print("\nFirst Sample")
+    print(first)
+
+    print("\nLast Sample")
+    print(last)
+
+    global chunk_count
+    global sample_count
+
+    # ------------------------------------------
+    # Convert BrainBit buffer into LSL chunk
+    # ------------------------------------------
+
+    chunk = []
+    callback_size = len(data)
 
     for sample in data:
 
-        buffer.append([
-            sample.Ch1,
-            sample.Ch2,
-            sample.Ch3,
-            sample.Ch4
+        chunk.append([
+            float(sample.Ch1),
+            float(sample.Ch2),
+            float(sample.Ch3),
+            float(sample.Ch4)
         ])
 
-        if len(buffer) >= CHUNK_SIZE:
+    # Push the entire buffer as ONE chunk
+    if chunk_count == 0:
 
-            outlet.push_chunk(buffer)
+     print("\n========== FIRST CALLBACK ==========")
+     print("Callback Size :", callback_size)
+     print("Chunk Size    :", len(chunk))
+     print("First Sample  :", chunk[0])
+     print("Last Sample   :", chunk[-1])
+     print("====================================")
+    outlet.push_chunk(chunk)
 
-            print(f"Sent chunk of {len(buffer)} samples")
+    chunk_count += 1
+    sample_count += len(chunk)
 
-            buffer = []
+    # Print every 10 chunks
+    if chunk_count % 10 == 0:
 
+        last = data[-1]
 
-def on_resist_received(sensor, data):
-    print("Resistance:", data)
+        print("\n======================================")
+        print(f"Chunk Number : {chunk_count}")
+        print(f"Samples Sent : {sample_count}")
+        print(f"Chunk Size   : {len(chunk)}")
 
+        print("\nLast Sample in Chunk")
 
-def on_amp_received(sensor, data):
-    print("Amplifier mode:", data)
+        print(f"Ch1 : {last.Ch1:.6f}")
+        print(f"Ch2 : {last.Ch2:.6f}")
+        print(f"Ch3 : {last.Ch3:.6f}")
+        print(f"Ch4 : {last.Ch4:.6f}")
 
+        print("======================================")
 
-# --------------------------------------------------
+# ==========================================================
 # MAIN
-# --------------------------------------------------
+# ==========================================================
+
+scanner = None
+sensor = None
 
 try:
 
@@ -85,7 +156,7 @@ try:
 
     scanner.sensorsChanged = sensor_found
 
-    print("Searching for BrainBit...")
+    print("\nSearching for BrainBit...")
 
     scanner.start()
 
@@ -96,81 +167,87 @@ try:
     sensors = scanner.sensors()
 
     if len(sensors) == 0:
-        print("No BrainBit found.")
-        exit()
+        raise Exception("No BrainBit Found.")
 
     sensor = scanner.create_sensor(sensors[0])
 
-    print("Device connected")
+    print("\nConnected Successfully")
 
     sensor.sensorStateChanged = on_sensor_state_changed
     sensor.batteryChanged = on_battery_changed
-    sensor.sensorAmpModeChanged = on_amp_received
+    sensor.sensorAmpModeChanged = on_amp_changed
 
     if sensor.is_supported_feature(SensorFeature.Signal):
-        sensor.signalDataReceived = on_signal_received
+        sensor.signalDataReceived = on_signal
 
     if sensor.is_supported_feature(SensorFeature.Resist):
-        sensor.resistDataReceived = on_resist_received
+        sensor.resistDataReceived = on_resist
 
-    print("Name:", sensor.name)
-    print("Battery:", sensor.batt_power)
-    print("Serial:", sensor.serial_number)
-
-    # --------------------------------------------------
-    # START EEG STREAM
-    # --------------------------------------------------
+    print("\n================ DEVICE ================")
+    print("Name    :", sensor.name)
+    print("Battery :", sensor.batt_power)
+    print("Serial  :", sensor.serial_number)
+    print("========================================")
 
     if sensor.is_supported_command(SensorCommand.StartSignal):
 
         sensor.exec_command(SensorCommand.StartSignal)
 
-        print("Streaming EEG in chunks...")
-        print("Recording for 10 seconds...\n")
+        print("\n========================================")
+        print("Continuous EEG Chunk Streaming Started")
+        print("LSL Stream Name : BrainBit_EEG")
+        print("Stream Type     : EEG")
+        print("Channels        : 4")
+        print("Sampling Rate   : 250 Hz")
+        print("Transmission    : CHUNKS")
+        print("")
+        print("Waiting for MATLAB / Android / LSL...")
+        print("Press Ctrl+C to stop.")
+        print("========================================")
 
-        sleep(10)
+        while True:
+            sleep(1)
 
+except KeyboardInterrupt:
+
+    print("\nStopping EEG Stream...")
+
+    try:
         sensor.exec_command(SensorCommand.StopSignal)
+    except:
+        pass
 
-        print("EEG streaming stopped.")
-
-    # --------------------------------------------------
-    # SEND ANY REMAINING SAMPLES
-    # --------------------------------------------------
-
-    if len(buffer) > 0:
-
-        outlet.push_chunk(buffer)
-
-        print(f"Sent final chunk of {len(buffer)} samples")
-
-        buffer = []
-
-    # --------------------------------------------------
-    # OPTIONAL RESISTANCE
-    # --------------------------------------------------
-
-    if sensor.is_supported_command(SensorCommand.StartResist):
-
-        sensor.exec_command(SensorCommand.StartResist)
-
-        print("Reading resistance...")
-
-        sleep(5)
-
-        sensor.exec_command(SensorCommand.StopResist)
-
-        print("Resistance measurement stopped.")
-
-    sensor.disconnect()
-
-    print("Disconnected from BrainBit.")
-
-    del sensor
-    del scanner
-
-    print("Finished.")
+    print("EEG Stream Stopped")
 
 except Exception as err:
 
+    print("\nERROR")
     print(err)
+
+finally:
+
+    print("\nCleaning up...")
+
+    try:
+        sensor.disconnect()
+    except:
+        pass
+
+    try:
+        del sensor
+    except:
+        pass
+
+    try:
+        del scanner
+    except:
+        pass
+
+    try:
+        del outlet
+    except:
+        pass
+
+    print("BrainBit disconnected")
+    print("LSL Outlet deleted")
+    print("Program finished")
